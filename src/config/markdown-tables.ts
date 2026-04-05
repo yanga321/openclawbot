@@ -1,4 +1,6 @@
+import { listBootstrapChannelPlugins } from "../channels/plugins/bootstrap-registry.js";
 import { normalizeChannelId } from "../channels/plugins/index.js";
+import { resolveAccountEntry } from "../routing/account-lookup.js";
 import { normalizeAccountId } from "../routing/session-key.js";
 import type { OpenClawConfig } from "./config.js";
 import type { MarkdownTableMode } from "./types.base.js";
@@ -13,13 +15,28 @@ type MarkdownConfigSection = MarkdownConfigEntry & {
   accounts?: Record<string, MarkdownConfigEntry>;
 };
 
-const DEFAULT_TABLE_MODES = new Map<string, MarkdownTableMode>([
-  ["signal", "bullets"],
-  ["whatsapp", "bullets"],
-]);
+function buildDefaultTableModes(): Map<string, MarkdownTableMode> {
+  return new Map(
+    listBootstrapChannelPlugins()
+      .flatMap((plugin) => {
+        const defaultMarkdownTableMode = plugin.messaging?.defaultMarkdownTableMode;
+        return defaultMarkdownTableMode ? [[plugin.id, defaultMarkdownTableMode] as const] : [];
+      })
+      .toSorted(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+let cachedDefaultTableModes: Map<string, MarkdownTableMode> | null = null;
+
+function getDefaultTableModes(): Map<string, MarkdownTableMode> {
+  cachedDefaultTableModes ??= buildDefaultTableModes();
+  return cachedDefaultTableModes;
+}
+
+export const DEFAULT_TABLE_MODES = getDefaultTableModes();
 
 const isMarkdownTableMode = (value: unknown): value is MarkdownTableMode =>
-  value === "off" || value === "bullets" || value === "code";
+  value === "off" || value === "bullets" || value === "code" || value === "block";
 
 function resolveMarkdownModeFromSection(
   section: MarkdownConfigSection | undefined,
@@ -31,15 +48,7 @@ function resolveMarkdownModeFromSection(
   const normalizedAccountId = normalizeAccountId(accountId);
   const accounts = section.accounts;
   if (accounts && typeof accounts === "object") {
-    const direct = accounts[normalizedAccountId];
-    const directMode = direct?.markdown?.tables;
-    if (isMarkdownTableMode(directMode)) {
-      return directMode;
-    }
-    const matchKey = Object.keys(accounts).find(
-      (key) => key.toLowerCase() === normalizedAccountId.toLowerCase(),
-    );
-    const match = matchKey ? accounts[matchKey] : undefined;
+    const match = resolveAccountEntry(accounts, normalizedAccountId);
     const matchMode = match?.markdown?.tables;
     if (isMarkdownTableMode(matchMode)) {
       return matchMode;
@@ -64,5 +73,8 @@ export function resolveMarkdownTableMode(params: {
     (params.cfg as Record<string, unknown> | undefined)?.[channel]) as
     | MarkdownConfigSection
     | undefined;
-  return resolveMarkdownModeFromSection(section, params.accountId) ?? defaultMode;
+  const resolved = resolveMarkdownModeFromSection(section, params.accountId) ?? defaultMode;
+  // "block" stays schema-valid for the shared markdown seam, but this PR
+  // keeps runtime delivery on safe text rendering until Slack send support lands.
+  return resolved === "block" ? "code" : resolved;
 }
